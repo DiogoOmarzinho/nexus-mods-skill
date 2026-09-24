@@ -1,0 +1,11 @@
+{
+  "name": "nexus-mods-skill",
+  "owner": { "name": "DiogoOmarzinho" },
+  "plugins": [
+    {
+      "name": "nexus-mods",
+      "source": "./plugins/nexus-mods",
+      "description": "Search Nexus Mods for any game and download mods the official way, through the Nexus API with your own key."
+    }
+  ]
+}
