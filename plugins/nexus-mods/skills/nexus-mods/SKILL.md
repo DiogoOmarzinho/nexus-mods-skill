@@ -54,7 +54,7 @@ Every download is logged, with its MD5, in `downloads.log` in the same config fo
 
 ## Limits and etiquette
 
-- Personal keys are rate limited (about 2,500 requests per day, then 100 per hour). `whoami` shows what is left. Don't loop over hundreds of mods; searches that return many results in one call are cheap.
+- Personal keys are rate limited (currently 2,000 requests per hour and 20,000 per day; `whoami` shows the live numbers and what is left). Don't loop over hundreds of mods; searches that return many results in one call are cheap.
 - Collections (`nxm://…/collections/…`) aren't supported. Point the user to Vortex for those.
 - Don't endorse, comment, track or do anything else on the user's account. This skill is for reading and downloading only.
 - Nexus supports mod authors through downloads and endorsements. When you download a mod, remind the user they can endorse it on the site if they like it.
