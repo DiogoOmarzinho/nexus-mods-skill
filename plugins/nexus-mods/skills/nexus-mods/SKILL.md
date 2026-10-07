@@ -7,7 +7,7 @@ description: Search Nexus Mods for any game, inspect mods (versions, files, requ
 
 Everything goes through `scripts/nexus.py` (Python 3, standard library only). Run it as `python <skill-dir>/scripts/nexus.py <command> ...`.
 
-Why a script instead of the website: Nexus pages block plain HTTP fetchers (403), browsing them costs a lot of tokens, and clicking "Slow download" through a browser is automation the site doesn't welcome. The APIs are public, fast and sanctioned. Looking things up needs no account at all.
+Why a script instead of the website: Nexus pages block plain HTTP fetchers (403), browsing them costs a lot of tokens, and clicking "Slow download" through a browser is automation the site doesn't welcome. The public GraphQL queries used here require no account. This prototype is not registered or approved by Nexus support; GraphQL v2 remains under development.
 
 ## Looking things up (no account needed)
 
@@ -29,7 +29,7 @@ Pointers for good answers:
 
 ## Downloading, the official way
 
-Downloads need the user's **personal API key**. The user creates it at https://www.nexusmods.com/settings/api-keys (the "Personal API Key" at the bottom of the page) and stores it **themselves**, in either:
+Authenticated commands in this unregistered testing prototype use the user's **personal API key**, strictly for development testing with selected testers or personal use. Do not present this as a registered public release or a substitute for application keys. The authentication approach for support evaluation is still awaiting confirmation. The user creates it at https://www.nexusmods.com/settings/api-keys (the "Personal API Key" at the bottom of the page) and stores it **themselves**, in either:
 - the environment variable `NEXUS_API_KEY`, or
 - a file named `apikey` in `%APPDATA%\nexus-mods\` (Windows) or `~/.config/nexus-mods/` (Linux/macOS).
 
@@ -54,8 +54,10 @@ Every download is logged, with its MD5, in `downloads.log` in the same config fo
 
 ## Limits and etiquette
 
-- Personal keys are rate limited (currently 2,000 requests per hour and 20,000 per day; `whoami` shows the live numbers and what is left). Don't loop over hundreds of mods; searches that return many results in one call are cheap.
+- The current published allowance is 20,000 requests per day, followed by 500 per hour; `whoami` shows live response headers. The helper observes quota headers, prevents further calls in the same process when known allowances are exhausted, and stops on 429 with reset/Retry-After guidance (one-hour fallback when absent). It never retries automatically. No quota state is saved across CLI invocations, and other clients are not coordinated. Do not repeatedly restart after throttling. Don't loop over hundreds of mods; searches that return many results in one call are cheap.
 - Collections (`nxm://…/collections/…`) aren't supported. Point the user to Vortex for those.
 - Don't endorse, comment, track or do anything else on the user's account. This skill is for reading and downloading only.
 - Nexus supports mod authors through downloads and endorsements. When you download a mod, remind the user they can endorse it on the site if they like it.
 - Installing the downloaded file depends on the game (Bethesda games, RE Engine games, Cyberpunk and others all differ). If the user has a game-specific skill or a mod manager, hand off to it. Otherwise, read the mod's description (`mod --description`) for its install instructions.
+
+Policy references: [acceptable use](https://help.nexusmods.com/article/114-api-acceptable-use-policy), [current limits](https://help.nexusmods.com/article/105-i-have-reached-a-daily-or-hourly-limit-api-requests-have-been-consumed-rate-limit-exceeded-what-does-this-mean), [GraphQL reference](https://graphql.nexusmods.com/).

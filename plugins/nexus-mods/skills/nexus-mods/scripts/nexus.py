@@ -13,6 +13,8 @@ API key lookup order: env NEXUS_API_KEY, then ~/.config/nexus-mods/apikey
 """
 import argparse
 import hashlib
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import json
 import os
 import re
@@ -24,8 +26,8 @@ import urllib.request
 from pathlib import Path
 
 APP_NAME = "claude-nexus-mods-skill"
-APP_VERSION = "1.0.0"
-GQL = "https://api-router.nexusmods.com/graphql"
+APP_VERSION = "1.0.1"
+GQL = "https://api.nexusmods.com/v2/graphql"
 V1 = "https://api.nexusmods.com/v1"
 UA = f"{APP_NAME}/{APP_VERSION}"
 
@@ -59,8 +61,75 @@ def api_key(required=True):
     return key
 
 
+# Deliberately process-local: no API key or quota state is persisted. REST and
+# GraphQL quotas are not assumed to be shared. Other clients remain invisible.
+_RATE_STATE = {}
+
+
+def reset_epoch(value):
+    """Accept epoch seconds, ISO timestamps and HTTP dates from API headers."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        date = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            date = parsedate_to_datetime(str(value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if date.tzinfo is None:
+        date = date.replace(tzinfo=timezone.utc)
+    return date.timestamp()
+
+
+def quota_exhausted(headers):
+    def remaining(name):
+        try:
+            return int(headers.get("x-rl-" + name + "-remaining"))
+        except (TypeError, ValueError):
+            return None
+    daily, hourly = remaining("daily"), remaining("hourly")
+    # Daily exhaustion alone still permits the hourly allowance. With missing
+    # headers, conservatively stop if the only known allowance is exhausted.
+    return ((daily is not None and daily <= 0 and (hourly is None or hourly <= 0))
+            or (hourly is not None and hourly <= 0 and daily is None))
+
+
+def observe_limits(scope, headers, throttled=False):
+    h = {k.lower(): v for k, v in headers.items()}
+    if not throttled and not quota_exhausted(h):
+        return
+    now = time.time()
+    retry = h.get("retry-after")
+    until = None
+    if retry is not None:
+        try:
+            until = now + max(0, int(retry))
+        except ValueError:
+            until = reset_epoch(retry)
+    if until is None:
+        resets = [reset_epoch(h.get("x-rl-" + period + "-reset"))
+                  for period in ("hourly", "daily")]
+        future = [r for r in resets if r is not None and r > now]
+        until = min(future) if future else now + 3600
+    _RATE_STATE[scope] = max(now + 1, until)
+
+
+def check_limits(scope):
+    until = _RATE_STATE.get(scope, 0)
+    if until > time.time():
+        when = datetime.fromtimestamp(until, timezone.utc).isoformat()
+        die(f"Nexus API requests paused until {when}; quota exhausted or HTTP 429. "
+            "No automatic retry. This guard applies only to this process.")
+
+
 def http_json(url, data=None, headers=None, method=None):
-    h = {"User-Agent": UA, "Accept": "application/json"}
+    scope = "rest" if url.startswith(V1 + "/") else "graphql"
+    check_limits(scope)
+    h = {"User-Agent": UA, "Accept": "application/json",
+         "Application-Name": APP_NAME, "Application-Version": APP_VERSION}
     h.update(headers or {})
     body = None
     if data is not None:
@@ -69,20 +138,24 @@ def http_json(url, data=None, headers=None, method=None):
     req = urllib.request.Request(url, data=body, headers=h, method=method)
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
+            observe_limits(scope, r.headers)
             limits = {k: v for k, v in r.headers.items() if k.lower().startswith("x-rl-")}
             return json.load(r), limits
     except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:400]
+        # Do not print remote bodies or request URLs: they may echo credentials
+        # or contain temporary nxm download tokens in their query strings.
+        observe_limits(scope, e.headers or {}, throttled=e.code == 429)
+        e.close()
         if e.code == 401:
-            die(f"401 unauthorized from Nexus ({detail}). The API key is missing, wrong or revoked.")
+            die("401 unauthorized from Nexus. The API key is missing, wrong or revoked.")
         if e.code == 403:
-            die(f"403 forbidden from Nexus ({detail}). For free accounts a download needs a fresh "
+            die("403 forbidden from Nexus. For free accounts a download needs a fresh "
                 "nxm:// link from the site's 'Mod manager download' button.")
         if e.code == 429:
-            die("429 rate limited by Nexus. Wait a while before trying again.")
-        die(f"HTTP {e.code} from {url}: {detail}")
-    except urllib.error.URLError as e:
-        die(f"network error talking to {url}: {e.reason}")
+            check_limits(scope)
+        die(f"HTTP {e.code} from Nexus API. No automatic retry.")
+    except urllib.error.URLError:
+        die("network error talking to Nexus API. No automatic retry.")
 
 
 def gql(query, variables=None):
@@ -94,8 +167,7 @@ def gql(query, variables=None):
 
 def v1(path, params=None):
     url = V1 + path + (("?" + urllib.parse.urlencode(params)) if params else "")
-    return http_json(url, headers={"apikey": api_key(), "Application-Name": APP_NAME,
-                                   "Application-Version": APP_VERSION})
+    return http_json(url, headers={"apikey": api_key()})
 
 
 def fmt_size(n):
@@ -232,10 +304,10 @@ def cmd_whoami(a):
 def parse_nxm(url):
     p = urllib.parse.urlparse(url)
     if p.scheme != "nxm":
-        die(f"not an nxm:// link: {url}")
+        die("not an nxm:// link")
     m = re.match(r"^/mods/(\d+)/files/(\d+)", p.path)
     if not m:
-        die(f"unrecognised nxm link (collections are not supported): {url}")
+        die("unrecognised nxm link (collections are not supported)")
     qs = urllib.parse.parse_qs(p.query)
     return {"game": p.netloc, "mod_id": int(m.group(1)), "file_id": int(m.group(2)),
             "key": (qs.get("key") or [None])[0], "expires": (qs.get("expires") or [None])[0]}

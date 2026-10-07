@@ -40,7 +40,9 @@ Or copy `plugins/nexus-mods/skills/nexus-mods` into `~/.claude/skills/`.
 
 Requires Python 3.8+.
 
-### Your API key (only needed for downloads)
+### Your API key (authenticated commands; testing/personal use only)
+
+This is an unregistered testing prototype. Personal API keys are for development testing with a select group of testers or personal use only. They are not a substitute for registered application keys in a public-facing release. Support has not approved registration or confirmed the authentication approach for this build. See [evaluation instructions](EVALUATION.md).
 
 1. Open https://www.nexusmods.com/settings/api-keys and copy the **Personal API Key** at the bottom of the page.
 2. Save it yourself. Don't paste it into the chat. Use either:
@@ -53,7 +55,7 @@ Requires Python 3.8+.
 - Claude asks before every download and shows the file name, page and size.
 - Your key is read from your own environment or file and never printed. Claude is told never to ask for it in chat.
 - Read and download only: no endorsing, commenting or tracking on your account.
-- Respects the API rate limits.
+- Reads API quota headers and stops on HTTP 429 without automatic retries. Preventive blocking lasts only within one process; separate CLI runs and other clients are not coordinated. See [limitations](EVALUATION.md).
 - Mod authors live on downloads and endorsements. If you like a mod, endorse it on Nexus.
 
 ## Using the script directly
