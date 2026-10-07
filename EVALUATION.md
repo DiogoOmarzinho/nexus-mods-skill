@@ -1,4 +1,4 @@
-# Support evaluation build 1.0.1
+# Support evaluation build 1.0.2
 
 Local testing prototype for ticket 266840, reviewed on 2026-10-07. Registration is
 not approved, and support's confirmation of REST/personal-key evaluation versus
@@ -41,7 +41,7 @@ a broader public release requires registration and its agreed authentication flo
 
 ## Changes and limits
 
-- Stable application name `claude-nexus-mods-skill`; version `1.0.1` agrees with
+- Stable application name `claude-nexus-mods-skill`; version `1.0.2` agrees with
   the plugin manifest. REST and GraphQL both send application name/version.
 - GraphQL now uses the documented `https://api.nexusmods.com/v2/graphql`.
   Before changing it, an identical public `game(domainName:...)` query returned
@@ -71,7 +71,7 @@ Environment: Linux, Python 3.12.3. Base commit:
 
 | Check | Result | Kind |
 |---|---|---|
-| 29 regression tests | Passed | Local, network/authentication/Windows registry simulated |
+| 51 regression tests | Passed | Local, network/authentication/Windows registry simulated |
 | CLI help | Passed | Local, real execution |
 | git diff --check | Passed | Local whitespace validation |
 | Old/new GraphQL game lookup | HTTP 200, same game | Two real public requests |
@@ -82,7 +82,8 @@ Environment: Linux, Python 3.12.3. Base commit:
 | Windows handler / Claude plugin installation | Not run | Deferred |
 | Python 3.8 runtime | Not run | Only Python 3.12.3 available for this evaluation |
 
-Eight public API calls were made in total. No API keys were read or transmitted.
+The initial 1.0.1 evaluation made eight public API calls. One additional public
+`games skyrim` call passed after the 1.0.2 transport changes (nine calls total). No API keys were read or transmitted.
 The tests verify behavior with simulated headers; actual quota exhaustion was not
 induced. Successful public queries verify the exercised query shapes, not the
 entire GraphQL schema or all filters.
@@ -111,15 +112,15 @@ GitHub authentication does not provide Nexus API access.
 Eleven additional offline tests cover fake key lookup precedence, `whoami` output,
 `updated` filtering, archive MD5 lookup, empty mirrors, incomplete-download cleanup,
 handler dispatch/error acknowledgment, simulated Windows registration/backup/
-restoration and Linux rejection of real registry commands. The complete suite has
-29 passing tests. All registry operations are in-memory fakes; no Windows execution
+restoration and Linux rejection of real registry commands. That follow-up brought the suite to
+29 passing tests; the handler/security fixes below bring it to 51. All registry operations are in-memory fakes; no Windows execution
 or OS protocol association was tested.
 
-Static handler limitations remain: backup/restoration stores only the previous
-open command, not the full registry metadata; unregister does not verify that
-this tool still owns the association before restoring/deleting it. The successful
-mock round trip does not cover a different application taking ownership between
-registration and removal. These behaviors need review before a real handler trial.
+The handler limitations found in that follow-up are now addressed in 1.0.2:
+all three modified values are saved with their original types/absence, and exact
+managed-state ownership is checked before restoration. Unrelated metadata,
+subkeys and existing permissions are left untouched rather than reconstructing
+an entire registry tree. See the security review below for concurrency limits.
 
 Smallest next steps, not performed by this evaluation:
 
@@ -136,6 +137,26 @@ Smallest next steps, not performed by this evaluation:
    logs or test reports. The actual flow sends the API key to Nexus REST and uses
    a signed URL for the CDN transfer. No arbitrary file was selected or downloaded.
 3. Windows: provide a real Windows test environment with Python and an approved
-   protocol-association trial, after addressing the handler ownership limitations.
+   protocol-association trial, including the new ownership/recovery cases.
    Linux mocks cannot validate browser launch, native registry behavior, quoting
    under Windows or real restoration of another mod manager.
+
+## Handler and security follow-up (1.0.2)
+
+See [SECURITY_REVIEW.md](SECURITY_REVIEW.md) for scope, corrected findings and
+reproducible evidence. Repeated registration preserves the first recovery record.
+Unregister refuses a changed managed association or a missing/legacy/corrupt
+backup. Legacy command-only backups are deliberately retained for manual recovery:
+do not delete them to force registration; restore the previous application through
+its own settings or review the old backup first. New empty keys are pruned only
+when they were absent before installation and remain empty. Failed transitions
+attempt guarded rollback and preserve a recovery record if incomplete.
+
+Backups now exist even when there was no previous handler. The schema changed to
+version 2; no unsafe automatic migration from command-only backups is attempted.
+
+Downloads now require HTTPS, reject unsafe decoded filenames, refuse pre-existing
+partial files, and omit signed URLs from transfer errors. Authenticated API
+redirects are refused, including same-host redirects; this intentional fail-closed
+behavior needs confirmation in live authenticated evaluation. No new dependencies,
+credential setup or Windows registry changes were introduced during testing.

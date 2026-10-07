@@ -23,7 +23,7 @@ Ask things like:
 
 **How downloads work:**
 - **Premium members** can download directly by mod and file id.
-- **Free members** click the site's "Mod manager download" button, as Nexus requires. The skill can register itself as the `nxm://` link handler on Windows, so the file then downloads automatically. The previous handler (Vortex, MO2…) is backed up and restored with one command.
+- **Free members** click the site's "Mod manager download" button, as Nexus requires. The skill can register itself as the `nxm://` link handler on Windows, so the file then downloads automatically. The values changed by registration are backed up with their original types; restoration refuses to overwrite an association changed by another app. Legacy backups need manual recovery.
 
 It's a single Python script using only the standard library. No pip install.
 
@@ -68,6 +68,8 @@ python .../nexus.py download --nxm "nxm://..."
 ```
 
 This is an unofficial community project, not affiliated with Nexus Mods or Anthropic. It uses Nexus's public APIs as documented for mod managers.
+
+See [evaluation instructions](EVALUATION.md) and the [security review](SECURITY_REVIEW.md) for test evidence and remaining limits.
 
 ## License
 

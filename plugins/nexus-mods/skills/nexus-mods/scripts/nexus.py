@@ -12,7 +12,9 @@ API key lookup order: env NEXUS_API_KEY, then ~/.config/nexus-mods/apikey
 (Windows: %APPDATA%\\nexus-mods\\apikey). The key is never printed.
 """
 import argparse
+import base64
 import hashlib
+import http.client
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import json
@@ -26,7 +28,7 @@ import urllib.request
 from pathlib import Path
 
 APP_NAME = "claude-nexus-mods-skill"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 GQL = "https://api.nexusmods.com/v2/graphql"
 V1 = "https://api.nexusmods.com/v1"
 UA = f"{APP_NAME}/{APP_VERSION}"
@@ -125,6 +127,19 @@ def check_limits(scope):
             "No automatic retry. This guard applies only to this process.")
 
 
+class SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        destination = urllib.parse.urlsplit(newurl)
+        authenticated = any(k.lower() == "apikey" for k, _ in req.header_items())
+        if authenticated or destination.scheme != "https" or destination.username or destination.password:
+            raise urllib.error.HTTPError(req.full_url, code, "Redirect refused", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open_url(req, timeout):
+    return urllib.request.build_opener(SafeRedirect()).open(req, timeout=timeout)
+
+
 def http_json(url, data=None, headers=None, method=None):
     scope = "rest" if url.startswith(V1 + "/") else "graphql"
     check_limits(scope)
@@ -137,7 +152,7 @@ def http_json(url, data=None, headers=None, method=None):
         h["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=body, headers=h, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with _open_url(req, timeout=60) as r:
             observe_limits(scope, r.headers)
             limits = {k: v for k, v in r.headers.items() if k.lower().startswith("x-rl-")}
             return json.load(r), limits
@@ -305,8 +320,8 @@ def parse_nxm(url):
     p = urllib.parse.urlparse(url)
     if p.scheme != "nxm":
         die("not an nxm:// link")
-    m = re.match(r"^/mods/(\d+)/files/(\d+)", p.path)
-    if not m:
+    m = re.fullmatch(r"/mods/(\d+)/files/(\d+)", p.path)
+    if not m or not re.fullmatch(r"[a-zA-Z0-9_-]+", p.netloc):
         die("unrecognised nxm link (collections are not supported)")
     qs = urllib.parse.parse_qs(p.query)
     return {"game": p.netloc, "mod_id": int(m.group(1)), "file_id": int(m.group(2)),
@@ -324,31 +339,50 @@ def do_download(game, mod_id, file_id, key=None, expires=None, out=None):
     if not links:
         die("Nexus returned no download mirrors.")
     url = links[0]["URI"]
-    name = urllib.parse.unquote(Path(urllib.parse.urlparse(url).path).name)
+    destination = urllib.parse.urlsplit(url)
+    if destination.scheme != "https" or not destination.hostname or destination.username or destination.password:
+        die("Nexus returned an unsupported download URL; HTTPS without embedded credentials is required.")
+    name = urllib.parse.unquote(destination.path.rsplit("/", 1)[-1])
+    reserved = {"CON", "PRN", "AUX", "NUL"} | {f"{p}{n}" for p in ("COM", "LPT") for n in range(1, 10)}
+    if (not name or name in (".", "..") or any(c in name for c in '/\\<>:"|?*')
+            or any(ord(c) < 32 or ord(c) == 127 for c in name) or name.endswith((".", " "))
+            or name.split(".")[0].upper() in reserved):
+        die("Nexus returned an unsafe download filename; no file written.")
     out_dir = Path(out) if out else downloads_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / name
     part = target.with_name(target.name + ".part")
-    print(f"Downloading {name} from {links[0].get('name', 'Nexus CDN')} -> {out_dir}")
+    print(f"Downloading {name} -> {out_dir}")
     md5 = hashlib.md5()
     req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=120) as r, open(part, "wb") as fh:
-        total = int(r.headers.get("Content-Length") or 0)
-        done, last = 0, 0
-        while True:
-            chunk = r.read(1 << 20)
-            if not chunk:
-                break
-            fh.write(chunk)
-            md5.update(chunk)
-            done += len(chunk)
-            if time.time() - last > 1:
-                last = time.time()
-                pct = f"{done * 100 // total}%" if total else fmt_size(done)
-                print(f"  {pct} ({fmt_size(done)} / {fmt_size(total)})", flush=True)
-    if total and done != total:
-        part.unlink(missing_ok=True)
-        die(f"download incomplete ({done} of {total} bytes).")
+    created_part = False
+    try:
+        # Exclusive creation never follows or truncates a pre-existing .part file.
+        with open(part, "xb") as fh:
+            created_part = True
+            with _open_url(req, timeout=120) as r:
+                total = int(r.headers.get("Content-Length") or 0)
+                done, last = 0, 0
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    md5.update(chunk)
+                    done += len(chunk)
+                    if time.time() - last > 1:
+                        last = time.time()
+                        pct = f"{done * 100 // total}%" if total else fmt_size(done)
+                        print(f"  {pct} ({fmt_size(done)} / {fmt_size(total)})", flush=True)
+        if total and done != total:
+            raise OSError("incomplete transfer")
+    except (OSError, ValueError, http.client.HTTPException) as error:
+        if isinstance(error, urllib.error.HTTPError):
+            error.close()
+        if created_part:
+            part.unlink(missing_ok=True)
+        die("Download failed or incomplete; no completed file saved. No automatic retry. "
+            "Check connectivity and any existing .part file before trying again.")
     part.replace(target)
     print(f"Saved: {target}\nSize: {fmt_size(done)}\nMD5:  {md5.hexdigest()}")
     log = config_dir() / "downloads.log"
@@ -424,44 +458,188 @@ def _reg():
     return winreg
 
 
+NXM_ROOT = r"Software\Classes\nxm"
+NXM_KEYS = [NXM_ROOT, NXM_ROOT + r"\shell", NXM_ROOT + r"\shell\open",
+            NXM_ROOT + r"\shell\open\command"]
+NXM_SLOTS = [(NXM_ROOT, ""), (NXM_ROOT, "URL Protocol"), (NXM_KEYS[-1], "")]
+
+
+def _nxm_command():
+    return f'"{sys.executable}" "{Path(__file__).resolve()}" handle-nxm "%1"'
+
+
+def _nxm_read(reg, path, name):
+    try:
+        with reg.OpenKey(reg.HKEY_CURRENT_USER, path) as key:
+            value, kind = reg.QueryValueEx(key, name)
+    except FileNotFoundError:
+        return None
+    return {"type": kind, "value": (base64.b64encode(value).decode("ascii")
+            if isinstance(value, bytes) else value), "binary": isinstance(value, bytes)}
+
+
+def _nxm_state(reg):
+    return [_nxm_read(reg, path, name) for path, name in NXM_SLOTS]
+
+
+def _nxm_write(reg, slot, value):
+    path, name = NXM_SLOTS[slot]
+    if value is None:
+        try:
+            with reg.OpenKey(reg.HKEY_CURRENT_USER, path, 0, reg.KEY_SET_VALUE) as key:
+                reg.DeleteValue(key, name)
+        except FileNotFoundError:
+            pass
+    else:
+        data = base64.b64decode(value["value"], validate=True) if value["binary"] else value["value"]
+        with reg.CreateKey(reg.HKEY_CURRENT_USER, path) as key:
+            reg.SetValueEx(key, name, 0, value["type"], data)
+
+
+def _nxm_transition(reg, expected, target):
+    # Guard every value we own; never treat a substring in a command as ownership.
+    if _nxm_state(reg) != expected:
+        die("nxm association changed; refusing to overwrite another application's settings. Backup kept.")
+    applied = []
+    try:
+        for i, value in enumerate(target):
+            if value != expected[i]:
+                # Recheck immediately before each write (registry updates are not atomic).
+                if _nxm_state(reg) != [target[j] if j in applied else expected[j] for j in range(3)]:
+                    raise OSError("association changed during update")
+                _nxm_write(reg, i, value)
+                applied.append(i)
+    except OSError:
+        # Best-effort rollback only while the managed values still match our writes.
+        # If another app intervenes, preserve it and leave the backup for review.
+        for i in reversed(applied):
+            if _nxm_state(reg) != [target[j] if j in applied else expected[j] for j in range(3)]:
+                break
+            try:
+                _nxm_write(reg, i, expected[i])
+                applied.remove(i)
+            except OSError:
+                break
+        raise
+
+
+def _nxm_prune(reg, created):
+    for path in reversed(created):
+        try:
+            with reg.OpenKey(reg.HKEY_CURRENT_USER, path) as key:
+                subkeys, values, _ = reg.QueryInfoKey(key)
+            if not subkeys and not values:
+                reg.DeleteKey(reg.HKEY_CURRENT_USER, path)
+        except FileNotFoundError:
+            pass
+
+
+def _nxm_validate_value(value):
+    if value is None:
+        return
+    kind, data, binary = value["type"], value["value"], value["binary"]
+    if type(kind) is not int or type(binary) is not bool:
+        raise ValueError("invalid registry type")
+    if binary:
+        if kind not in (0, 3, 6, 8, 9, 10):
+            raise ValueError("invalid binary type")
+        base64.b64decode(data, validate=True)
+    elif kind in (1, 2) and isinstance(data, str):
+        pass
+    elif kind == 7 and isinstance(data, list) and all(isinstance(v, str) for v in data):
+        pass
+    elif kind in (4, 5, 11) and type(data) is int and 0 <= data < 2 ** (64 if kind == 11 else 32):
+        pass
+    else:
+        raise ValueError("unsupported registry value")
+
+
+def _nxm_load(backup):
+    try:
+        record = json.loads(backup.read_text(encoding="utf-8"))
+        if not isinstance(record, dict) or record.get("schema") != 2:
+            raise ValueError("legacy backup")
+        for field in ("before", "installed"):
+            if not isinstance(record[field], list) or len(record[field]) != 3:
+                raise ValueError("invalid state")
+            for value in record[field]:
+                _nxm_validate_value(value)
+        if record["created"] != [p for p in NXM_KEYS if p in record["created"]]:
+            raise ValueError("invalid key paths")
+        if not isinstance(record["command"], str) or record["installed"] != [
+                {"type": 1, "value": v, "binary": False}
+                for v in ("URL:Nexus Mods Link", "", record["command"])]:
+            raise ValueError("invalid ownership record")
+        return record
+    except (OSError, ValueError, KeyError, TypeError):
+        die("Invalid or legacy nxm backup. No registry changes made; keep the backup for manual recovery.")
+
+
 def cmd_register_nxm(a):
-    winreg = _reg()
+    reg = _reg()
     backup = config_dir() / "nxm_handler_backup.json"
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\nxm\shell\open\command") as k:
-            previous = winreg.QueryValueEx(k, "")[0]
-    except OSError:
-        previous = None
-    if previous and "handle-nxm" not in previous and not backup.exists():
+        if backup.exists():
+            record = _nxm_load(backup)
+            if record["command"] == _nxm_command() and _nxm_state(reg) == record["installed"]:
+                print("nxm handler already registered; original backup preserved.")
+                return
+            die("Existing nxm backup or changed ownership; unregister/review it before registering again. No changes made.")
+        before = _nxm_state(reg)
+        try:
+            for value in before:
+                _nxm_validate_value(value)
+        except (ValueError, TypeError, KeyError):
+            die("Unsupported existing registry values; no changes made.")
+        if before[-1] and before[-1]["value"] == _nxm_command():
+            die("Existing handler has no recovery backup; refusing to replace its original state.")
+        created = []
+        for path in NXM_KEYS:
+            try:
+                with reg.OpenKey(reg.HKEY_CURRENT_USER, path):
+                    pass
+            except FileNotFoundError:
+                created.append(path)
+        installed = [{"type": reg.REG_SZ, "value": v, "binary": False}
+                     for v in ("URL:Nexus Mods Link", "", _nxm_command())]
+        record = {"schema": 2, "command": _nxm_command(), "before": before,
+                  "installed": installed, "created": created}
         backup.parent.mkdir(parents=True, exist_ok=True)
-        backup.write_text(json.dumps({"command": previous}), encoding="utf-8")
-        print(f"Existing nxm handler saved to {backup}:\n  {previous}")
-    cmd = f'"{sys.executable}" "{Path(__file__).resolve()}" handle-nxm "%1"'
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\nxm") as k:
-        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "URL:Nexus Mods Link")
-        winreg.SetValueEx(k, "URL Protocol", 0, winreg.REG_SZ, "")
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\nxm\shell\open\command") as k:
-        winreg.SetValueEx(k, "", 0, winreg.REG_SZ, cmd)
-    print(f"nxm:// links now open with:\n  {cmd}\nUndo with `unregister-nxm`.")
+        # Exclusive creation prevents replacing another run's original snapshot.
+        with backup.open("x", encoding="utf-8") as stream:
+            json.dump(record, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            _nxm_transition(reg, before, installed)
+        except OSError:
+            if _nxm_state(reg) == before:
+                _nxm_prune(reg, created)
+                backup.unlink()
+            raise
+        print("nxm handler registered. Previous values/types preserved; undo with unregister-nxm.")
+    except OSError:
+        die("Could not register nxm handler. No further writes attempted; inspect any retained recovery backup.")
 
 
 def cmd_unregister_nxm(a):
-    winreg = _reg()
+    reg = _reg()
     backup = config_dir() / "nxm_handler_backup.json"
-    if backup.exists():
-        previous = json.loads(backup.read_text(encoding="utf-8"))["command"]
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\nxm\shell\open\command") as k:
-            winreg.SetValueEx(k, "", 0, winreg.REG_SZ, previous)
+    if not backup.exists():
+        die("No nxm recovery backup; refusing to remove an unverified association.")
+    record = _nxm_load(backup)
+    try:
+        current = _nxm_state(reg)
+        if current == record["before"]:
+            # A prior restore completed but cleanup failed; no association writes.
+            _nxm_prune(reg, record["created"])
+        else:
+            _nxm_transition(reg, record["installed"], record["before"])
+            _nxm_prune(reg, record["created"])
         backup.unlink()
-        print(f"Restored previous nxm handler:\n  {previous}")
-        return
-    for sub in (r"Software\Classes\nxm\shell\open\command", r"Software\Classes\nxm\shell\open",
-                r"Software\Classes\nxm\shell", r"Software\Classes\nxm"):
-        try:
-            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, sub)
-        except OSError:
-            pass
-    print("nxm handler removed (there was no previous handler to restore).")
+        print("Previous nxm values restored; unrelated metadata and subkeys preserved.")
+    except OSError:
+        die("Could not restore nxm handler. Recovery backup kept; inspect before retrying.")
 
 
 # ---------------------------------------------------------------- main

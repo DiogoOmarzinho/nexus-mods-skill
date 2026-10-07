@@ -1,6 +1,6 @@
 {
   "name": "nexus-mods",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Search Nexus Mods for any game and download mods the official way (Nexus API + your own key, nxm:// handler for free accounts). No scraping, no browser automation.",
   "author": { "name": "DiogoOmarzinho" },
   "homepage": "https://github.com/DiogoOmarzinho/nexus-mods-skill",

@@ -32,7 +32,7 @@ class NexusTests(unittest.TestCase):
         return output.getvalue()
 
     def test_graphql_identity_without_key_lookup(self):
-        with patch.object(nexus, 'api_key', side_effect=AssertionError('must not read credentials')), patch.object(nexus.urllib.request, 'urlopen', return_value=response({'data': {'game': {'id': 1704}}})) as send:
+        with patch.object(nexus, 'api_key', side_effect=AssertionError('must not read credentials')), patch.object(nexus, '_open_url', return_value=response({'data': {'game': {'id': 1704}}})) as send:
             self.assertEqual(nexus.gql('query { game { id } }'), {'game': {'id': 1704}})
         req = send.call_args.args[0]
         headers = dict((k.lower(), v) for k, v in req.header_items())
@@ -42,7 +42,7 @@ class NexusTests(unittest.TestCase):
         self.assertNotIn('apikey', headers)
 
     def test_rest_identity_and_mock_auth(self):
-        with patch.object(nexus, 'api_key', return_value='TEST-ONLY-NOT-A-CREDENTIAL'), patch.object(nexus.urllib.request, 'urlopen', return_value=response({'name': 'Tester'}, {'X-RL-Daily-Remaining': '42'})) as send:
+        with patch.object(nexus, 'api_key', return_value='TEST-ONLY-NOT-A-CREDENTIAL'), patch.object(nexus, '_open_url', return_value=response({'name': 'Tester'}, {'X-RL-Daily-Remaining': '42'})) as send:
             data, limits = nexus.v1('/users/validate.json')
         headers = dict((k.lower(), v) for k, v in send.call_args.args[0].header_items())
         self.assertEqual(headers['apikey'], 'TEST-ONLY-NOT-A-CREDENTIAL')
@@ -61,7 +61,7 @@ class NexusTests(unittest.TestCase):
 
     def test_preventive_block_and_expiry(self):
         headers = {'X-RL-Daily-Remaining': '0', 'X-RL-Hourly-Remaining': '0', 'X-RL-Hourly-Reset': '1100'}
-        with patch.object(nexus.time, 'time', return_value=1000), patch.object(nexus.urllib.request, 'urlopen', return_value=response({}, headers)) as send:
+        with patch.object(nexus.time, 'time', return_value=1000), patch.object(nexus, '_open_url', return_value=response({}, headers)) as send:
             nexus.http_json(nexus.V1 + '/test')
             self.assertIn('paused', self.failure(lambda: nexus.http_json(nexus.V1 + '/test')))
             self.assertEqual(send.call_count, 1)
@@ -79,7 +79,7 @@ class NexusTests(unittest.TestCase):
 
     def test_429_retry_after_no_retry_or_secret_output(self):
         error = HTTPError(nexus.V1 + '/test?key=SECRET', 429, 'limited', {'Retry-After': '120'}, io.BytesIO(b'SECRET'))
-        with patch.object(nexus.time, 'time', return_value=1000), patch.object(nexus.urllib.request, 'urlopen', side_effect=error) as send:
+        with patch.object(nexus.time, 'time', return_value=1000), patch.object(nexus, '_open_url', side_effect=error) as send:
             text = self.failure(lambda: nexus.http_json(nexus.V1 + '/test?key=SECRET'))
             self.assertIn('No automatic retry', text)
             self.assertNotIn('SECRET', text)
@@ -102,9 +102,9 @@ class NexusTests(unittest.TestCase):
     def test_errors_do_not_echo_body_url_or_reason(self):
         for code in (401, 403, 500):
             error = HTTPError(nexus.V1 + '/test?key=SECRET', code, 'SECRET', {}, io.BytesIO(b'SECRET'))
-            with patch.object(nexus.urllib.request, 'urlopen', side_effect=error):
+            with patch.object(nexus, '_open_url', side_effect=error):
                 self.assertNotIn('SECRET', self.failure(lambda: nexus.http_json(nexus.V1 + '/test?key=SECRET')))
-        with patch.object(nexus.urllib.request, 'urlopen', side_effect=URLError('SECRET')):
+        with patch.object(nexus, '_open_url', side_effect=URLError('SECRET')):
             self.assertNotIn('SECRET', self.failure(lambda: nexus.http_json(nexus.V1 + '/test?key=SECRET')))
 
     def test_invalid_nxm_does_not_echo_token(self):
@@ -116,7 +116,7 @@ class NexusTests(unittest.TestCase):
                          {'game': 'game', 'mod_id': 1, 'file_id': 2, 'key': 'TEST', 'expires': '42'})
 
     def test_graphql_errors(self):
-        with patch.object(nexus.urllib.request, 'urlopen', return_value=response({'errors': [{'message': 'Unknown field'}]})):
+        with patch.object(nexus, '_open_url', return_value=response({'errors': [{'message': 'Unknown field'}]})):
             self.assertIn('Unknown field', self.failure(lambda: nexus.gql('query { bad }')))
 
     def test_free_account_cannot_download_directly(self):
@@ -134,7 +134,7 @@ class NexusTests(unittest.TestCase):
     def test_simulated_download_writes_file_and_log_without_tokens(self):
         payload = io.BytesIO(b'test mod bytes')
         payload.headers = {'Content-Length': '14'}
-        with TemporaryDirectory() as tmp, patch.object(nexus, 'config_dir', return_value=Path(tmp)), patch.object(nexus, 'v1', return_value=([{'URI': 'https://example.test/mod.zip?token=SECRET', 'name': 'Test'}], {})) as rest, patch.object(nexus.urllib.request, 'urlopen', return_value=payload) as cdn, contextlib.redirect_stdout(io.StringIO()) as output:
+        with TemporaryDirectory() as tmp, patch.object(nexus, 'config_dir', return_value=Path(tmp)), patch.object(nexus, 'v1', return_value=([{'URI': 'https://example.test/mod.zip?token=SECRET', 'name': 'Test'}], {})) as rest, patch.object(nexus, '_open_url', return_value=payload) as cdn, contextlib.redirect_stdout(io.StringIO()) as output:
             target = nexus.do_download('game', 1, 2, 'SECRET', '42', tmp)
             self.assertEqual(target.read_bytes(), b'test mod bytes')
             self.assertNotIn('SECRET', (Path(tmp) / 'downloads.log').read_text())

@@ -30,11 +30,16 @@ class FakeKey:
 class FakeRegistry:
     HKEY_CURRENT_USER = object()
     REG_SZ = 1
+    KEY_SET_VALUE = 2
 
     def __init__(self, previous=None):
-        self.values = {} if previous is None else {COMMAND: {'': previous}}
+        self.values = {}
+        self.types = {}
+        if previous is not None:
+            self.CreateKey(self.HKEY_CURRENT_USER, COMMAND)
+            self.values[COMMAND][''] = previous
 
-    def OpenKey(self, root, path):
+    def OpenKey(self, root, path, reserved=0, access=None):
         assert root is self.HKEY_CURRENT_USER
         if path not in self.values:
             raise FileNotFoundError(path)
@@ -42,15 +47,31 @@ class FakeRegistry:
 
     def CreateKey(self, root, path):
         assert root is self.HKEY_CURRENT_USER
+        for candidate in nexus.NXM_KEYS:
+            if path == candidate or path.startswith(candidate + "\\"):
+                self.values.setdefault(candidate, {})
         self.values.setdefault(path, {})
         return FakeKey(path)
 
     def QueryValueEx(self, key, name):
-        return self.values[key.path][name], self.REG_SZ
+        if name not in self.values[key.path]:
+            raise FileNotFoundError(name)
+        return self.values[key.path][name], self.types.get((key.path, name), self.REG_SZ)
 
     def SetValueEx(self, key, name, reserved, kind, value):
-        assert kind == self.REG_SZ
         self.values[key.path][name] = value
+        self.types[key.path, name] = kind
+
+    def DeleteValue(self, key, name):
+        if name not in self.values[key.path]:
+            raise FileNotFoundError(name)
+        del self.values[key.path][name]
+        self.types.pop((key.path, name), None)
+
+    def QueryInfoKey(self, key):
+        prefix = key.path + "\\"
+        children = [p for p in self.values if p.startswith(prefix) and "\\" not in p[len(prefix):]]
+        return len(children), len(self.values[key.path]), 0
 
     def DeleteKey(self, root, path):
         assert root is self.HKEY_CURRENT_USER
@@ -101,7 +122,7 @@ class EvaluationPathTests(unittest.TestCase):
         rest.assert_called_once_with('/games/game/mods/md5_search/' + digest + '.json')
 
     def test_empty_mirror_response_never_calls_cdn(self):
-        with patch.object(nexus, 'v1', return_value=([], {})), patch.object(nexus.urllib.request, 'urlopen') as cdn, contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+        with patch.object(nexus, 'v1', return_value=([], {})), patch.object(nexus, '_open_url') as cdn, contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             nexus.do_download('game', 1, 2)
         cdn.assert_not_called()
 
@@ -111,7 +132,7 @@ class EvaluationPathTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             target = Path(tmp) / 'mod.zip'
             target.write_bytes(b'existing-file')
-            with patch.object(nexus, 'config_dir', return_value=Path(tmp)), patch.object(nexus, 'v1', return_value=([{'URI': 'https://example.test/mod.zip'}], {})), patch.object(nexus.urllib.request, 'urlopen', return_value=payload), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            with patch.object(nexus, 'config_dir', return_value=Path(tmp)), patch.object(nexus, 'v1', return_value=([{'URI': 'https://example.test/mod.zip'}], {})), patch.object(nexus, '_open_url', return_value=payload), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 nexus.do_download('game', 1, 2, out=tmp)
             self.assertEqual(target.read_bytes(), b'existing-file')
             self.assertFalse((Path(tmp) / 'mod.zip.part').exists())
@@ -136,13 +157,13 @@ class EvaluationPathTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch.object(nexus, '_reg', return_value=registry), patch.object(nexus, 'config_dir', return_value=Path(tmp)), patch.object(nexus.sys, 'executable', 'C:\\Program Files\\Python\\python.exe'), contextlib.redirect_stdout(io.StringIO()):
             nexus.cmd_register_nxm(SimpleNamespace())
             backup = Path(tmp) / 'nxm_handler_backup.json'
-            self.assertEqual(json.loads(backup.read_text())['command'], previous)
+            self.assertEqual(json.loads(backup.read_text())['before'][-1]['value'], previous)
             command = registry.values[COMMAND]['']
             self.assertTrue(command.startswith('"C:\\Program Files\\Python\\python.exe" "'))
             self.assertTrue(command.endswith('" handle-nxm "%1"'))
             self.assertEqual(registry.values[r'Software\Classes\nxm']['URL Protocol'], '')
             nexus.cmd_register_nxm(SimpleNamespace())
-            self.assertEqual(json.loads(backup.read_text())['command'], previous)
+            self.assertEqual(json.loads(backup.read_text())['before'][-1]['value'], previous)
             nexus.cmd_unregister_nxm(SimpleNamespace())
             self.assertEqual(registry.values[COMMAND][''], previous)
             self.assertFalse(backup.exists())
@@ -151,7 +172,7 @@ class EvaluationPathTests(unittest.TestCase):
         registry = FakeRegistry()
         with TemporaryDirectory() as tmp, patch.object(nexus, '_reg', return_value=registry), patch.object(nexus, 'config_dir', return_value=Path(tmp)), contextlib.redirect_stdout(io.StringIO()):
             nexus.cmd_register_nxm(SimpleNamespace())
-            self.assertFalse((Path(tmp) / 'nxm_handler_backup.json').exists())
+            self.assertTrue((Path(tmp) / 'nxm_handler_backup.json').exists())
             nexus.cmd_unregister_nxm(SimpleNamespace())
             self.assertEqual(registry.values, {})
 
