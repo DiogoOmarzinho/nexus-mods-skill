@@ -71,7 +71,7 @@ Environment: Linux, Python 3.12.3. Base commit:
 
 | Check | Result | Kind |
 |---|---|---|
-| 18 regression tests | Passed | Local, network/authentication simulated |
+| 29 regression tests | Passed | Local, network/authentication/Windows registry simulated |
 | CLI help | Passed | Local, real execution |
 | git diff --check | Passed | Local whitespace validation |
 | Old/new GraphQL game lookup | HTTP 200, same game | Two real public requests |
@@ -100,3 +100,42 @@ using personal keys, while GraphQL's current reference describes optional OAuth
 for protected fields and a developing API; neither constitutes approval of this
 application. The OAuth guide did not expose substantive page text to the browser
 reader during this review and was not used to infer implementation requirements.
+
+## Follow-up feasibility check (2026-10-07)
+
+Only configuration presence was inspected: `NEXUS_API_KEY` is absent from the
+executor environment and no `apikey` file exists at the configured Linux lookup
+location. No key contents were read and no new Nexus credentials were created.
+GitHub authentication does not provide Nexus API access.
+
+Eleven additional offline tests cover fake key lookup precedence, `whoami` output,
+`updated` filtering, archive MD5 lookup, empty mirrors, incomplete-download cleanup,
+handler dispatch/error acknowledgment, simulated Windows registration/backup/
+restoration and Linux rejection of real registry commands. The complete suite has
+29 passing tests. All registry operations are in-memory fakes; no Windows execution
+or OS protocol association was tested.
+
+Static handler limitations remain: backup/restoration stores only the previous
+open command, not the full registry metadata; unregister does not verify that
+this tool still owns the association before restoring/deleting it. The successful
+mock round trip does not cover a different application taking ownership between
+registration and removal. These behaviors need review before a real handler trial.
+
+Smallest next steps, not performed by this evaluation:
+
+1. REST: identify a user-controlled environment where a Nexus key is already
+   configured, then obtain explicit permission for one `whoami` call. That call
+   transmits the key only to `https://api.nexusmods.com/v1/users/validate.json` and
+   displays account/Premium status and rate headers. If no such environment exists,
+   user-side key setup is required in a separate authorized step; do not send the
+   key in chat. Support's authentication decision remains pending.
+2. Download: select one exact mod/file and destination, show page/name/size, and
+   obtain permission to download it. Premium direct download requires a confirmed
+   Premium account; a free-account trial requires the user's fresh website-issued
+   nxm link. The link contains a temporary secret and must not be published in
+   logs or test reports. The actual flow sends the API key to Nexus REST and uses
+   a signed URL for the CDN transfer. No arbitrary file was selected or downloaded.
+3. Windows: provide a real Windows test environment with Python and an approved
+   protocol-association trial, after addressing the handler ownership limitations.
+   Linux mocks cannot validate browser launch, native registry behavior, quoting
+   under Windows or real restoration of another mod manager.
